@@ -29,7 +29,7 @@ class MemOSConfig:
     data_dir: Path = field(default_factory=_default_data_dir)
     api_port: int = 11437
     api_host: str = "127.0.0.1"
-    backend: str = "zvec"
+    backend: str = "lancedb" if os.name == "nt" else "zvec"
     embedding_model: str = "all-MiniLM-L6-v2"
     embedding_dim: int = 384
     log_level: str = "INFO"

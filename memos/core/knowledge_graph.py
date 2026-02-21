@@ -81,9 +81,9 @@ class Relationship:
 
 
 class KnowledgeGraph:
-    """Entity-relationship knowledge graph backed by Zvec.
+    """Entity-relationship knowledge graph backed by Zvec (or LanceDB on Windows).
 
-    Uses two separate Zvec collections:
+    Uses two separate collections/tables:
     - `entities`:      Stores entity nodes with vector embeddings of their names.
     - `relationships`: Stores relationship edges with metadata.
 
@@ -94,30 +94,35 @@ class KnowledgeGraph:
     def __init__(self, config: MemOSConfig | None = None) -> None:
         self.config = config or MemOSConfig()
         self._embedder = EmbeddingEngine(model_name=self.config.embedding_model)
-        self._entities_collection: zvec.Collection | None = None
-        self._relationships_collection: zvec.Collection | None = None
+        self._entities_col: Any = None
+        self._relationships_col: Any = None
+        self._db: Any = None
         self._initialized = False
 
     def initialize(self) -> None:
-        """Create or open the entity and relationship collections."""
+        """Create or open the entity and relationship storage."""
         if self._initialized:
             return
 
         self.config.ensure_dirs()
-        self._init_entities_collection()
-        self._init_relationships_collection()
+        
+        if self.config.backend == "zvec":
+            self._init_zvec()
+        else:
+            self._init_lancedb()
+            
         self._initialized = True
-        logger.info("KnowledgeGraph initialized.")
+        logger.info("KnowledgeGraph initialized (backend=%s).", self.config.backend)
 
-    def _init_entities_collection(self) -> None:
-        """Set up the entities Zvec collection."""
+    def _init_zvec(self) -> None:
+        """Set up Zvec collections."""
+        import zvec
+        
+        # Entities
         path = str(self.config.entities_path)
-
         schema = zvec.CollectionSchema(
             name="entities",
-            vectors=zvec.VectorSchema(
-                "embedding", zvec.DataType.VECTOR_FP32, self.config.embedding_dim
-            ),
+            vectors=zvec.VectorSchema("embedding", zvec.DataType.VECTOR_FP32, self.config.embedding_dim),
             fields=[
                 zvec.ScalarSchema("name", zvec.DataType.STRING),
                 zvec.ScalarSchema("entity_type", zvec.DataType.STRING),
@@ -125,22 +130,17 @@ class KnowledgeGraph:
                 zvec.ScalarSchema("created_at", zvec.DataType.STRING),
             ],
         )
-
         try:
-            self._entities_collection = zvec.open(path=path)
+            self._entities_col = zvec.open(path=path)
         except Exception:
             self.config.entities_path.mkdir(parents=True, exist_ok=True)
-            self._entities_collection = zvec.create_and_open(path=path, schema=schema)
+            self._entities_col = zvec.create_and_open(path=path, schema=schema)
 
-    def _init_relationships_collection(self) -> None:
-        """Set up the relationships Zvec collection."""
+        # Relationships
         path = str(self.config.relationships_path)
-
         schema = zvec.CollectionSchema(
             name="relationships",
-            vectors=zvec.VectorSchema(
-                "embedding", zvec.DataType.VECTOR_FP32, self.config.embedding_dim
-            ),
+            vectors=zvec.VectorSchema("embedding", zvec.DataType.VECTOR_FP32, self.config.embedding_dim),
             fields=[
                 zvec.ScalarSchema("from_entity", zvec.DataType.STRING),
                 zvec.ScalarSchema("to_entity", zvec.DataType.STRING),
@@ -149,12 +149,51 @@ class KnowledgeGraph:
                 zvec.ScalarSchema("created_at", zvec.DataType.STRING),
             ],
         )
-
         try:
-            self._relationships_collection = zvec.open(path=path)
+            self._relationships_col = zvec.open(path=path)
         except Exception:
             self.config.relationships_path.mkdir(parents=True, exist_ok=True)
-            self._relationships_collection = zvec.create_and_open(path=path, schema=schema)
+            self._relationships_col = zvec.create_and_open(path=path, schema=schema)
+
+    def _init_lancedb(self) -> None:
+        """Set up LanceDB tables."""
+        import lancedb
+        import pyarrow as pa
+        
+        db_path = self.config.db_path / "kg"
+        db_path.mkdir(parents=True, exist_ok=True)
+        self._db = lancedb.connect(str(db_path))
+        
+        # Entities Schema
+        e_schema = pa.schema([
+            pa.field("id", pa.string()),
+            pa.field("embedding", pa.list_(pa.float32(), self.config.embedding_dim)),
+            pa.field("name", pa.string()),
+            pa.field("entity_type", pa.string()),
+            pa.field("properties_json", pa.string()),
+            pa.field("created_at", pa.string()),
+        ])
+        
+        if "entities" in self._db.table_names():
+            self._entities_col = self._db.open_table("entities")
+        else:
+            self._entities_col = self._db.create_table("entities", schema=e_schema)
+            
+        # Relationships Schema
+        r_schema = pa.schema([
+            pa.field("id", pa.string()),
+            pa.field("embedding", pa.list_(pa.float32(), self.config.embedding_dim)),
+            pa.field("from_entity", pa.string()),
+            pa.field("to_entity", pa.string()),
+            pa.field("relationship_type", pa.string()),
+            pa.field("properties_json", pa.string()),
+            pa.field("created_at", pa.string()),
+        ])
+        
+        if "relationships" in self._db.table_names():
+            self._relationships_col = self._db.open_table("relationships")
+        else:
+            self._relationships_col = self._db.create_table("relationships", schema=r_schema)
 
     def _ensure_initialized(self) -> None:
         if not self._initialized:
@@ -170,46 +209,28 @@ class KnowledgeGraph:
         entity_type: str = "concept",
         properties: dict[str, Any] | None = None,
     ) -> Entity:
-        """Add a new entity to the knowledge graph.
-
-        Args:
-            name:        Human-readable entity name.
-            entity_type: Category (e.g., "person", "project", "concept").
-            properties:  Optional key-value properties.
-
-        Returns:
-            The created Entity object.
-        """
         self._ensure_initialized()
-        assert self._entities_collection is not None
-
         entity_id = generate_id()
         now = datetime.now(timezone.utc).isoformat()
-
-        # Embed the entity name for semantic search
         embedding = self._embedder.embed_text(f"{entity_type}: {name}")
+        props_json = json.dumps(properties or {})
 
-        doc = zvec.Doc(
-            id=entity_id,
-            vectors={"embedding": embedding},
-            fields={
-                "name": name,
-                "entity_type": entity_type,
-                "properties_json": json.dumps(properties or {}),
-                "created_at": now,
-            },
-        )
+        if self.config.backend == "zvec":
+            import zvec
+            doc = zvec.Doc(
+                id=entity_id,
+                vectors={"embedding": embedding},
+                fields={"name": name, "entity_type": entity_type, "properties_json": props_json, "created_at": now},
+            )
+            self._entities_col.insert(doc)
+        else:
+            self._entities_col.add([{
+                "id": entity_id, "embedding": embedding, "name": name, 
+                "entity_type": entity_type, "properties_json": props_json, "created_at": now
+            }])
 
-        self._entities_collection.insert(doc)
         logger.info("Added entity '%s' (type=%s, id=%s)", name, entity_type, entity_id)
-
-        return Entity(
-            id=entity_id,
-            name=name,
-            entity_type=entity_type,
-            properties=properties or {},
-            created_at=now,
-        )
+        return Entity(id=entity_id, name=name, entity_type=entity_type, properties=properties or {}, created_at=now)
 
     def search_entities(
         self,
@@ -217,42 +238,41 @@ class KnowledgeGraph:
         top_k: int = 5,
         entity_type: str | None = None,
     ) -> list[Entity]:
-        """Search for entities by semantic similarity.
-
-        Args:
-            query:       Natural language search query.
-            top_k:       Maximum number of results.
-            entity_type: Optional filter by entity type.
-
-        Returns:
-            List of matching Entity objects.
-        """
         self._ensure_initialized()
-        assert self._entities_collection is not None
-
         embedding = self._embedder.embed_text(query)
-
-        query_kwargs: dict[str, Any] = {
-            "vectors": zvec.VectorQuery(field_name="embedding", vector=embedding),
-            "topk": top_k,
-        }
-        if entity_type:
-            query_kwargs["filter"] = f'entity_type = "{entity_type}"'
-
-        results = self._entities_collection.query(**query_kwargs)
-
         entities: list[Entity] = []
-        for hit in results:
-            fields = hit.fields if hasattr(hit, "fields") else {}
-            entities.append(
-                Entity(
+
+        if self.config.backend == "zvec":
+            import zvec
+            query_kwargs: dict[str, Any] = {
+                "vectors": zvec.VectorQuery(field_name="embedding", vector=embedding),
+                "topk": top_k,
+            }
+            if entity_type:
+                query_kwargs["filter"] = f'entity_type = "{entity_type}"'
+            results = self._entities_col.query(**query_kwargs)
+            for hit in results:
+                f = hit.fields if hasattr(hit, "fields") else {}
+                entities.append(Entity(
                     id=hit.id if hasattr(hit, "id") else "",
-                    name=fields.get("name", ""),
-                    entity_type=fields.get("entity_type", "concept"),
-                    properties=json.loads(fields.get("properties_json", "{}")),
-                    created_at=fields.get("created_at", ""),
-                )
-            )
+                    name=f.get("name", ""),
+                    entity_type=f.get("entity_type", "concept"),
+                    properties=json.loads(f.get("properties_json", "{}")),
+                    created_at=f.get("created_at", ""),
+                ))
+        else:
+            q = self._entities_col.search(embedding).limit(top_k)
+            if entity_type:
+                q = q.where(f'entity_type = "{entity_type}"')
+            results = q.to_arrow().to_pydict()
+            for i in range(len(results["id"])):
+                entities.append(Entity(
+                    id=results["id"][i],
+                    name=results["name"][i],
+                    entity_type=results["entity_type"][i],
+                    properties=json.loads(results["properties_json"][i]),
+                    created_at=results["created_at"][i],
+                ))
 
         return entities
 
@@ -267,52 +287,34 @@ class KnowledgeGraph:
         relationship_type: str = "related_to",
         properties: dict[str, Any] | None = None,
     ) -> Relationship:
-        """Add a relationship (edge) between two entities.
-
-        Args:
-            from_entity:       Source entity name.
-            to_entity:         Target entity name.
-            relationship_type: Type of relationship (e.g., "uses", "knows").
-            properties:        Optional key-value properties.
-
-        Returns:
-            The created Relationship object.
-        """
         self._ensure_initialized()
-        assert self._relationships_collection is not None
-
         rel_id = generate_id()
         now = datetime.now(timezone.utc).isoformat()
-
-        # Embed the relationship description for semantic search
         description = f"{from_entity} {relationship_type} {to_entity}"
         embedding = self._embedder.embed_text(description)
+        props_json = json.dumps(properties or {})
 
-        doc = zvec.Doc(
-            id=rel_id,
-            vectors={"embedding": embedding},
-            fields={
-                "from_entity": from_entity,
-                "to_entity": to_entity,
-                "relationship_type": relationship_type,
-                "properties_json": json.dumps(properties or {}),
-                "created_at": now,
-            },
-        )
+        if self.config.backend == "zvec":
+            import zvec
+            doc = zvec.Doc(
+                id=rel_id,
+                vectors={"embedding": embedding},
+                fields={
+                    "from_entity": from_entity, "to_entity": to_entity,
+                    "relationship_type": relationship_type, "properties_json": props_json, "created_at": now
+                },
+            )
+            self._relationships_col.insert(doc)
+        else:
+            self._relationships_col.add([{
+                "id": rel_id, "embedding": embedding, "from_entity": from_entity, "to_entity": to_entity,
+                "relationship_type": relationship_type, "properties_json": props_json, "created_at": now
+            }])
 
-        self._relationships_collection.insert(doc)
-        logger.info(
-            "Added relationship: %s -[%s]-> %s (id=%s)",
-            from_entity, relationship_type, to_entity, rel_id,
-        )
-
+        logger.info("Added relationship: %s -[%s]-> %s", from_entity, relationship_type, to_entity)
         return Relationship(
-            id=rel_id,
-            from_entity=from_entity,
-            to_entity=to_entity,
-            relationship_type=relationship_type,
-            properties=properties or {},
-            created_at=now,
+            id=rel_id, from_entity=from_entity, to_entity=to_entity,
+            relationship_type=relationship_type, properties=properties or {}, created_at=now
         )
 
     def get_related(
@@ -321,61 +323,45 @@ class KnowledgeGraph:
         relationship_type: str | None = None,
         top_k: int = 10,
     ) -> list[Relationship]:
-        """Find all relationships involving a given entity.
-
-        Args:
-            entity_name:       The entity to search for.
-            relationship_type: Optional filter by relationship type.
-            top_k:             Maximum number of results.
-
-        Returns:
-            List of Relationship objects involving the entity.
-        """
         self._ensure_initialized()
-        assert self._relationships_collection is not None
-
-        # Build filter for entity name (either side of the relationship)
-        filter_parts: list[str] = []
-        filter_parts.append(
-            f'(from_entity = "{entity_name}" OR to_entity = "{entity_name}")'
-        )
-        if relationship_type:
-            filter_parts.append(f'relationship_type = "{relationship_type}"')
-
-        filter_str = " AND ".join(filter_parts)
-
-        try:
-            results = self._relationships_collection.query(
-                filter=filter_str, topk=top_k
-            )
-        except Exception:
-            # Fallback: if OR filters not supported, do semantic search
-            embedding = self._embedder.embed_text(entity_name)
-            results = self._relationships_collection.query(
-                vectors=zvec.VectorQuery(field_name="embedding", vector=embedding),
-                topk=top_k,
-            )
-
         relationships: list[Relationship] = []
-        for hit in results:
-            fields = hit.fields if hasattr(hit, "fields") else {}
 
-            # Filter results to only include this entity
-            from_e = fields.get("from_entity", "")
-            to_e = fields.get("to_entity", "")
-            if entity_name not in (from_e, to_e):
-                continue
-
-            relationships.append(
-                Relationship(
-                    id=hit.id if hasattr(hit, "id") else "",
-                    from_entity=from_e,
-                    to_entity=to_e,
-                    relationship_type=fields.get("relationship_type", "related_to"),
-                    properties=json.loads(fields.get("properties_json", "{}")),
-                    created_at=fields.get("created_at", ""),
+        if self.config.backend == "zvec":
+            f_parts = [f'(from_entity = "{entity_name}" OR to_entity = "{entity_name}")']
+            if relationship_type: f_parts.append(f'relationship_type = "{relationship_type}"')
+            try:
+                results = self._relationships_col.query(filter=" AND ".join(f_parts), topk=top_k)
+            except Exception:
+                embedding = self._embedder.embed_text(entity_name)
+                results = self._relationships_col.query(
+                    vectors={"embedding": embedding}, topk=top_k
                 )
-            )
+            for hit in results:
+                f = hit.fields if hasattr(hit, "fields") else {}
+                relationships.append(Relationship(
+                    id=hit.id if hasattr(hit, "id") else "",
+                    from_entity=f.get("from_entity", ""),
+                    to_entity=f.get("to_entity", ""),
+                    relationship_type=f.get("relationship_type", "related_to"),
+                    properties=json.loads(f.get("properties_json", "{}")),
+                    created_at=f.get("created_at", ""),
+                ))
+        else:
+            # LanceDB SQL filter
+            where = f'(from_entity = "{entity_name}" OR to_entity = "{entity_name}")'
+            if relationship_type:
+                where += f' AND relationship_type = "{relationship_type}"'
+            
+            results = self._relationships_col.search().where(where).limit(top_k).to_arrow().to_pydict()
+            for i in range(len(results["id"])):
+                relationships.append(Relationship(
+                    id=results["id"][i],
+                    from_entity=results["from_entity"][i],
+                    to_entity=results["to_entity"][i],
+                    relationship_type=results["relationship_type"][i],
+                    properties=json.loads(results["properties_json"][i]),
+                    created_at=results["created_at"][i],
+                ))
 
         return relationships
 
@@ -384,14 +370,11 @@ class KnowledgeGraph:
     # -------------------------------------------------------------------
 
     def close(self) -> None:
-        """Close all collections and release resources."""
-        for col in (self._entities_collection, self._relationships_collection):
-            if col is not None:
-                try:
-                    col.close()
-                except Exception:
-                    pass
-        self._entities_collection = None
-        self._relationships_collection = None
+        """Close collections."""
+        if self.config.backend == "zvec":
+            for col in (self._entities_col, self._relationships_col):
+                if col is not None: col.close()
+        self._entities_col = None
+        self._relationships_col = None
         self._initialized = False
         logger.info("KnowledgeGraph shut down.")

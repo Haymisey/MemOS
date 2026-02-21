@@ -78,9 +78,11 @@ class MemoryEngine:
                 embedding_dim=self.config.embedding_dim,
             )
         elif self.config.backend == "lancedb":
-            # Future: from memos.core.lancedb_backend import LanceDBBackend
-            raise NotImplementedError(
-                "LanceDB backend not yet implemented. Install with: pip install memos[lancedb]"
+            from memos.core.lancedb_backend import LanceDBBackend
+
+            return LanceDBBackend(
+                db_path=self.config.db_path,
+                embedding_dim=self.config.embedding_dim,
             )
         else:
             raise ValueError(f"Unknown backend: {self.config.backend}")
