@@ -24,31 +24,37 @@ class ZvecBackend(VectorStoreBackend):
         self._embedding_dim = embedding_dim
         self._collection: Any = None
 
+    @property
+    def zvec(self):
+        """Lazy-loaded zvec module."""
+        import zvec
+        return zvec
+
     def initialize(self) -> None:
         """Create or open the memories collection."""
-        import zvec
+        zv = self.zvec
         self._db_path.mkdir(parents=True, exist_ok=True)
         collection_path = str(self._db_path / "memories")
 
-        schema = zvec.CollectionSchema(
+        schema = zv.CollectionSchema(
             name="memories",
-            vectors=zvec.VectorSchema("embedding", zvec.DataType.VECTOR_FP32, self._embedding_dim),
+            vectors=zv.VectorSchema("embedding", zv.DataType.VECTOR_FP32, self._embedding_dim),
             fields=[
-                zvec.ScalarSchema("content", zvec.DataType.STRING),
-                zvec.ScalarSchema("source", zvec.DataType.STRING),
-                zvec.ScalarSchema("memory_type", zvec.DataType.STRING),
-                zvec.ScalarSchema("tags_json", zvec.DataType.STRING),
-                zvec.ScalarSchema("created_at", zvec.DataType.STRING),
-                zvec.ScalarSchema("updated_at", zvec.DataType.STRING),
-                zvec.ScalarSchema("metadata_json", zvec.DataType.STRING),
+                zv.ScalarSchema("content", zv.DataType.STRING),
+                zv.ScalarSchema("source", zv.DataType.STRING),
+                zv.ScalarSchema("memory_type", zv.DataType.STRING),
+                zv.ScalarSchema("tags_json", zv.DataType.STRING),
+                zv.ScalarSchema("created_at", zv.DataType.STRING),
+                zv.ScalarSchema("updated_at", zv.DataType.STRING),
+                zv.ScalarSchema("metadata_json", zv.DataType.STRING),
             ],
         )
 
         try:
-            self._collection = zvec.open(path=collection_path)
+            self._collection = zv.open(path=collection_path)
             logger.info("Opened existing Zvec collection at %s", collection_path)
         except Exception:
-            self._collection = zvec.create_and_open(path=collection_path, schema=schema)
+            self._collection = zv.create_and_open(path=collection_path, schema=schema)
             logger.info("Created new Zvec collection at %s", collection_path)
 
     def _ensure_collection(self) -> Any:
@@ -69,9 +75,10 @@ class ZvecBackend(VectorStoreBackend):
     ) -> str:
         """Store a new memory in Zvec."""
         collection = self._ensure_collection()
+        zv = self.zvec
         now = datetime.now(timezone.utc).isoformat()
 
-        doc = zvec.Doc(
+        doc = zv.Doc(
             id=id,
             vectors={"embedding": embedding},
             fields={

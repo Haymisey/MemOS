@@ -177,8 +177,23 @@ def status() -> None:
     if config.pid_file.exists():
         try:
             pid = int(config.pid_file.read_text().strip())
-            os.kill(pid, 0)
-            running = True
+            if os.name == "nt":
+                # Windows doesn't support os.kill(pid, 0) reliably for non-child processes
+                # and can throw SystemError in some cases.
+                try:
+                    import ctypes
+                    handle = ctypes.windll.kernel32.OpenProcess(1, False, pid)
+                    if handle:
+                        ctypes.windll.kernel32.CloseHandle(handle)
+                        running = True
+                except Exception:
+                    # Fallback to checking if the PID is actually alive via tasklist if ctypes fails
+                    res = subprocess.run(["tasklist", "/FI", f"PID eq {pid}", "/NH"], 
+                                       capture_output=True, text=True)
+                    running = str(pid) in res.stdout
+            else:
+                os.kill(pid, 0)
+                running = True
         except (ProcessLookupError, ValueError, OSError):
             pass
 
