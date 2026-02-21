@@ -102,11 +102,15 @@ def start(
         ))
 
         # Launch daemon process
+        env = os.environ.copy()
+        env["PYTHONIOENCODING"] = "utf-8"
+
         proc = subprocess.Popen(
             [sys.executable, "-m", "memos.cli.main", "start", "--foreground",
              "--host", host, "--port", str(port)],
-            stdout=open(str(config.log_file), "a"),
+            stdout=open(str(config.log_file), "a", encoding="utf-8"),
             stderr=subprocess.STDOUT,
+            env=env,
             start_new_session=True,
         )
 

@@ -21,7 +21,6 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
 
-import zvec
 
 from memos.core.base import generate_id
 from memos.core.config import MemOSConfig

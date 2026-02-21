@@ -12,66 +12,38 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-import zvec
-
 from memos.core.base import Memory, SearchFilter, SearchResult, VectorStoreBackend
 
 logger = logging.getLogger("memos.core.zvec_backend")
 
-
 class ZvecBackend(VectorStoreBackend):
-    """Zvec implementation of the VectorStoreBackend interface.
-
-    Storage layout:
-        {db_path}/memories/   — main memory collection
-        Each memory is a Zvec Document with:
-            - id:       unique hex string
-            - vectors:  {"embedding": [float x 384]}
-            - fields:   {"content", "source", "memory_type", "tags_json",
-                         "created_at", "updated_at", "metadata_json"}
-
-    Notes:
-        - Zvec doesn't support array-of-string filtering natively, so tags
-          are stored as a JSON string and filtered in Python post-query.
-        - All writes are immediately visible for querying (Zvec guarantee).
-    """
-
-    # Zvec scalar field schema for memories
-    _SCALAR_FIELDS = [
-        zvec.ScalarSchema("content", zvec.DataType.STRING),
-        zvec.ScalarSchema("source", zvec.DataType.STRING),
-        zvec.ScalarSchema("memory_type", zvec.DataType.STRING),
-        zvec.ScalarSchema("tags_json", zvec.DataType.STRING),         # JSON-encoded list
-        zvec.ScalarSchema("created_at", zvec.DataType.STRING),
-        zvec.ScalarSchema("updated_at", zvec.DataType.STRING),
-        zvec.ScalarSchema("metadata_json", zvec.DataType.STRING),     # JSON-encoded dict
-    ]
+    """Zvec implementation of the VectorStoreBackend interface."""
 
     def __init__(self, db_path: Path, embedding_dim: int = 384) -> None:
-        """Initialize the Zvec backend.
-
-        Args:
-            db_path:       Directory to store the Zvec collection.
-            embedding_dim: Dimensionality of embedding vectors (default: 384).
-        """
         self._db_path = db_path
         self._embedding_dim = embedding_dim
-        self._collection: zvec.Collection | None = None
+        self._collection: Any = None
 
     def initialize(self) -> None:
-        """Create or open the memories collection with the defined schema."""
+        """Create or open the memories collection."""
+        import zvec
         self._db_path.mkdir(parents=True, exist_ok=True)
         collection_path = str(self._db_path / "memories")
 
         schema = zvec.CollectionSchema(
             name="memories",
-            vectors=zvec.VectorSchema(
-                "embedding", zvec.DataType.VECTOR_FP32, self._embedding_dim
-            ),
-            fields=self._SCALAR_FIELDS,
+            vectors=zvec.VectorSchema("embedding", zvec.DataType.VECTOR_FP32, self._embedding_dim),
+            fields=[
+                zvec.ScalarSchema("content", zvec.DataType.STRING),
+                zvec.ScalarSchema("source", zvec.DataType.STRING),
+                zvec.ScalarSchema("memory_type", zvec.DataType.STRING),
+                zvec.ScalarSchema("tags_json", zvec.DataType.STRING),
+                zvec.ScalarSchema("created_at", zvec.DataType.STRING),
+                zvec.ScalarSchema("updated_at", zvec.DataType.STRING),
+                zvec.ScalarSchema("metadata_json", zvec.DataType.STRING),
+            ],
         )
 
-        # Try to open existing collection, else create new one
         try:
             self._collection = zvec.open(path=collection_path)
             logger.info("Opened existing Zvec collection at %s", collection_path)
@@ -79,7 +51,7 @@ class ZvecBackend(VectorStoreBackend):
             self._collection = zvec.create_and_open(path=collection_path, schema=schema)
             logger.info("Created new Zvec collection at %s", collection_path)
 
-    def _ensure_collection(self) -> zvec.Collection:
+    def _ensure_collection(self) -> Any:
         """Return the active collection, raising if not initialized."""
         if self._collection is None:
             raise RuntimeError("ZvecBackend not initialized. Call initialize() first.")
