@@ -244,6 +244,6 @@ MIT — build the future, freely.
 
 ---
 
-<p align="center">
+<!-- <p align="center">
   <strong>Whoever builds the standard open-source "Memory Layer" that all agents plug into<br/>will own the infrastructure of the AI agent decade.</strong>
-</p>
+</p> -->
