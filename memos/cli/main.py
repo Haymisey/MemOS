@@ -18,6 +18,7 @@ import subprocess
 import sys
 import time
 
+import httpx
 import typer
 from rich import print as rprint
 from rich.console import Console
@@ -55,6 +56,22 @@ def _get_engine() -> MemoryEngine:
     engine = MemoryEngine(config=config)
     engine.initialize()
     return engine
+
+
+def _get_api_client() -> httpx.Client | None:
+    """Return a healthy API client if the daemon is running, else None."""
+    config = _get_config()
+    url = f"http://{config.api_host}:{config.api_port}"
+    client = httpx.Client(base_url=url, timeout=30.0)
+    try:
+        # Quick health check
+        resp = client.get("/v1/health")
+        if resp.status_code == 200:
+            return client
+    except (httpx.ConnectError, httpx.HTTPError):
+        pass
+    client.close()
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -105,13 +122,24 @@ def start(
         env = os.environ.copy()
         env["PYTHONIOENCODING"] = "utf-8"
 
+        popen_kwargs = {
+            "stdout": open(str(config.log_file), "a", encoding="utf-8"),
+            "stderr": subprocess.STDOUT,
+            "env": env,
+            "start_new_session": True,
+        }
+
+        if os.name == "nt":
+            # On Windows, use these flags to ensure the process survives when the terminal closes
+            popen_kwargs["creationflags"] = (
+                subprocess.CREATE_NEW_PROCESS_GROUP | 
+                subprocess.DETACHED_PROCESS
+            )
+
         proc = subprocess.Popen(
             [sys.executable, "-m", "memos.cli.main", "start", "--foreground",
              "--host", host, "--port", str(port)],
-            stdout=open(str(config.log_file), "a", encoding="utf-8"),
-            stderr=subprocess.STDOUT,
-            env=env,
-            start_new_session=True,
+            **popen_kwargs
         )
 
         config.pid_file.write_text(str(proc.pid))
@@ -252,8 +280,38 @@ def add(
 ) -> None:
     """💾 Store a new memory."""
     with console.status("[cyan]Storing memory...[/cyan]", spinner="dots"):
-        engine = _get_engine()
         tag_list = [t.strip() for t in tags.split(",") if t.strip()] if tags else []
+
+        # Try API first (instant)
+        client = _get_api_client()
+        if client:
+            try:
+                resp = client.post("/v1/memories", json={
+                    "content": content,
+                    "source": source,
+                    "memory_type": memory_type,
+                    "tags": tag_list,
+                })
+                resp.raise_for_status()
+                data = resp.json()
+                client.close()
+
+                rprint(Panel(
+                    f"[green]Memory stored successfully![/green]\n\n"
+                    f"  [bold]ID:[/bold]     [cyan]{data['id']}[/cyan]\n"
+                    f"  [bold]Source:[/bold] {data['source']}\n"
+                    f"  [bold]Type:[/bold]   {data['memory_type']}\n"
+                    f"  [bold]Tags:[/bold]   {', '.join(data['tags']) if data['tags'] else '[dim]none[/dim]'}\n"
+                    f"  [bold]Size:[/bold]   {len(content)} chars",
+                    title="💾 Stored (via API)",
+                    border_style="green",
+                ))
+                return
+            except Exception as e:
+                console.print(f"[dim]API add failed, falling back to local: {e}[/dim]")
+
+        # Fallback to local engine (requires loading model)
+        engine = _get_engine()
         memory = engine.store(
             content=content,
             source=source,
@@ -269,7 +327,7 @@ def add(
         f"  [bold]Type:[/bold]   {memory.memory_type}\n"
         f"  [bold]Tags:[/bold]   {', '.join(memory.tags) if memory.tags else '[dim]none[/dim]'}\n"
         f"  [bold]Size:[/bold]   {len(content)} chars",
-        title="💾 Stored",
+        title="💾 Stored (Local Fallback)",
         border_style="green",
     ))
 
@@ -283,6 +341,51 @@ def search(
 ) -> None:
     """🔍 Search memories by semantic similarity."""
     with console.status("[cyan]Searching...[/cyan]", spinner="dots"):
+        # Try API first (instant)
+        client = _get_api_client()
+        if client:
+            try:
+                resp = client.post("/v1/memories/search", json={
+                    "query": query,
+                    "top_k": top_k,
+                    "source": source,
+                    "memory_type": memory_type,
+                })
+                resp.raise_for_status()
+                data = resp.json()
+                client.close()
+
+                if not data["results"]:
+                    rprint(Panel(
+                        f"[yellow]No results found for:[/yellow] \"{query}\"",
+                        title="🔍 Search (via API)",
+                        border_style="yellow",
+                    ))
+                    return
+
+                rprint(f"\n[bold]🔍 Results for:[/bold] \"{query}\" [dim](via API)[/dim]\n")
+                for i, r in enumerate(data["results"], 1):
+                    m = r["memory"]
+                    score_pct = r["score"] * 100 if r["score"] <= 1 else r["score"]
+                    display_content = m["content"][:200] + "..." if len(m["content"]) > 200 else m["content"]
+                    
+                    score_style = "bold green" if score_pct >= 80 else "bold yellow" if score_pct >= 50 else "bold red"
+                    tag_str = ", ".join(m["tags"]) if m["tags"] else "[dim]none[/dim]"
+                    
+                    rprint(Panel(
+                        f"{display_content}\n\n"
+                        f"  [dim]ID:[/dim] {m['id']}  "
+                        f"[dim]Source:[/dim] {m['source']}  "
+                        f"[dim]Type:[/dim] {m['memory_type']}  "
+                        f"[dim]Tags:[/dim] {tag_str}",
+                        title=f"#{i}  [{score_style}]{score_pct:.1f}% match[/{score_style}]",
+                        border_style="cyan",
+                    ))
+                return
+            except Exception as e:
+                console.print(f"[dim]API search failed, falling back to local: {e}[/dim]")
+
+        # Fallback to local engine
         engine = _get_engine()
         filters = SearchFilter(source=source, memory_type=memory_type)
         results = engine.search(query=query, top_k=top_k, filters=filters)
@@ -291,12 +394,12 @@ def search(
     if not results:
         rprint(Panel(
             f"[yellow]No results found for:[/yellow] \"{query}\"",
-            title="🔍 Search",
+            title="🔍 Search (Local Fallback)",
             border_style="yellow",
         ))
         return
 
-    rprint(f"\n[bold]🔍 Results for:[/bold] \"{query}\"\n")
+    rprint(f"\n[bold]🔍 Results for:[/bold] \"{query}\" [dim](Local Fallback)[/dim]\n")
 
     for i, result in enumerate(results, 1):
         m = result.memory
@@ -334,6 +437,18 @@ def list_memories(
 ) -> None:
     """📋 List stored memories."""
     with console.status("[cyan]Loading memories...[/cyan]", spinner="dots"):
+        # Try API first
+        client = _get_api_client()
+        if client:
+            try:
+                # We use the search endpoint with no query but filters if supported,
+                # or add a dedicated list endpoint. For now, let's just check the health and use local
+                # as listing is usually fast since it doesn't involve embeddings.
+                # However, for consistency, let's keep it local for now.
+                pass
+            except Exception:
+                pass
+
         engine = _get_engine()
         filters = SearchFilter(source=source, memory_type=memory_type)
         memories = engine.list_memories(filters=filters)

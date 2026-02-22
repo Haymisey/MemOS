@@ -107,12 +107,13 @@ class ZvecBackend(VectorStoreBackend):
     ) -> list[SearchResult]:
         """Semantic search using vector similarity."""
         collection = self._ensure_collection()
+        zv = self.zvec
 
         # Build Zvec filter string for supported scalar filters
         filter_str = self._build_filter_string(filters)
 
         query_kwargs: dict[str, Any] = {
-            "vectors": zvec.VectorQuery(field_name="embedding", vector=embedding),
+            "vectors": zv.VectorQuery(field_name="embedding", vector=embedding),
             "topk": top_k * 3 if filters and filters.tags else top_k,  # Over-fetch if tag filtering needed
         }
         if filter_str:
@@ -168,9 +169,10 @@ class ZvecBackend(VectorStoreBackend):
             return False
 
         collection = self._ensure_collection()
+        zv = self.zvec
         now = datetime.now(timezone.utc).isoformat()
 
-        doc = zvec.Doc(
+        doc = zv.Doc(
             id=id,
             vectors={"embedding": embedding or existing.embedding},
             fields={
