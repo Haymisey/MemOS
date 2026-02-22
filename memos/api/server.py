@@ -14,7 +14,7 @@ import logging
 from contextlib import asynccontextmanager
 from typing import Any
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 
 from memos import __version__
@@ -88,11 +88,30 @@ def create_app(config: MemOSConfig | None = None) -> FastAPI:
         _knowledge_graph = KnowledgeGraph(config=cfg)
         _knowledge_graph.initialize()
 
+        # --- Initialize Connectors ---
+        from memos.connectors.clipboard_watcher import ClipboardWatcher
+        from memos.connectors.file_watcher import FileWatcher
+
+        app.state.file_watcher = FileWatcher(_engine, watch_dirs=cfg.watch_dirs)
+        app.state.file_watcher.start()
+
+        app.state.clipboard_watcher = None
+        if cfg.enable_clipboard:
+            app.state.clipboard_watcher = ClipboardWatcher(_engine)
+            app.state.clipboard_watcher.start()
+
         logger.info("MemOS API server ready on %s:%d", cfg.api_host, cfg.api_port)
         yield
 
         # Shutdown
         logger.info("Shutting down MemOS API server...")
+        
+        # Stop connectors first
+        if app.state.file_watcher:
+            app.state.file_watcher.stop()
+        if app.state.clipboard_watcher:
+            app.state.clipboard_watcher.stop()
+
         if _engine:
             _engine.close()
         if _knowledge_graph:
@@ -301,10 +320,25 @@ def _register_graph_routes(app: FastAPI) -> None:
 
 def _register_system_routes(app: FastAPI) -> None:
     @app.get("/v1/health", response_model=HealthResponse, tags=["System"])
-    async def health():
-        """Health check with engine statistics."""
+    async def health(request: Request):
+        """Health check with engine statistics and connector status."""
         engine = _get_engine()
         stats = engine.stats()
+        
+        # Access app state for connector status
+        fw = getattr(request.app.state, "file_watcher", None)
+        cw = getattr(request.app.state, "clipboard_watcher", None)
+        
+        connectors = {
+            "file_watcher": {
+                "active": fw.is_running if fw else False,
+                "dirs": [str(d) for d in fw._watch_dirs] if fw else []
+            },
+            "clipboard_watcher": {
+                "active": cw.is_running if cw else False
+            }
+        }
+        
         return HealthResponse(
             status="ok",
             version=__version__,
@@ -314,4 +348,5 @@ def _register_system_routes(app: FastAPI) -> None:
             embedding_model=stats["embedding_model"],
             embedding_dim=stats["embedding_dim"],
             data_dir=stats["data_dir"],
+            connectors=connectors,
         )

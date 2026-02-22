@@ -17,6 +17,8 @@ import signal
 import subprocess
 import sys
 import time
+from pathlib import Path
+from typing import Any
 
 import httpx
 import typer
@@ -44,6 +46,10 @@ app = typer.Typer(
 entity_app = typer.Typer(help="🔗 Knowledge graph entity operations", no_args_is_help=True)
 app.add_typer(entity_app, name="entity")
 
+# Sub-command group for watching
+watch_app = typer.Typer(help="👁️  Manage directory watching", no_args_is_help=True)
+app.add_typer(watch_app, name="watch")
+
 
 def _get_config() -> MemOSConfig:
     """Load MemOS configuration."""
@@ -62,16 +68,48 @@ def _get_api_client() -> httpx.Client | None:
     """Return a healthy API client if the daemon is running, else None."""
     config = _get_config()
     url = f"http://{config.api_host}:{config.api_port}"
-    client = httpx.Client(base_url=url, timeout=30.0)
+    client = httpx.Client(base_url=url, timeout=5.0) # Shorter timeout for health check
     try:
-        # Quick health check
         resp = client.get("/v1/health")
         if resp.status_code == 200:
             return client
-    except (httpx.ConnectError, httpx.HTTPError):
+    except Exception:
         pass
     client.close()
     return None
+
+
+@watch_app.command(name="add")
+def watch_add(path: Path = typer.Argument(..., help="Directory to watch")):
+    """👁️  Add a directory to the auto-ingestion watcher."""
+    config = _get_config()
+    path = path.expanduser().resolve()
+    if not path.is_dir():
+        rprint(f"[red]Error:[/red] {path} is not a directory.")
+        raise typer.Exit(1)
+    
+    if path not in config.watch_dirs:
+        config.watch_dirs.append(path)
+        config.save()
+        rprint(f"[green]Added to watch list:[/green] {path}")
+        rprint("[dim]Restart the daemon for changes to take effect.[/dim]")
+    else:
+        rprint(f"[yellow]Already watching:[/yellow] {path}")
+
+
+@watch_app.command(name="list")
+def watch_list():
+    """📋 List all directories currently being watched."""
+    config = _get_config()
+    if not config.watch_dirs:
+        rprint("[yellow]No directories are being watched.[/yellow]")
+        return
+    
+    table = Table(title="👁️  Watched Directories", border_style="cyan")
+    table.add_column("Path", style="white")
+    for d in config.watch_dirs:
+        table.add_row(str(d))
+    console.print(table)
 
 
 # ---------------------------------------------------------------------------
@@ -82,43 +120,62 @@ def _get_api_client() -> httpx.Client | None:
 @app.command()
 def start(
     foreground: bool = typer.Option(False, "--foreground", "-f", help="Run in foreground"),
-    host: str = typer.Option("127.0.0.1", "--host", "-h", help="API host"),
-    port: int = typer.Option(11437, "--port", "-p", help="API port"),
+    host: str = typer.Option(None, "--host", "-h", help="API host (overrides config)"),
+    port: int = typer.Option(None, "--port", "-p", help="API port (overrides config)"),
+    clipboard: bool = typer.Option(None, "--clipboard/--no-clipboard", help="Enable/disable clipboard watching"),
 ) -> None:
     """🚀 Start the MemOS daemon (REST API + MCP server)."""
     config = _get_config()
-    config.api_host = host
-    config.api_port = port
+    
+    if host: config.api_host = host
+    if port: config.api_port = port
+    if clipboard is not None: config.enable_clipboard = clipboard
+    
+    config.save()
     config.ensure_dirs()
+    
+    host = config.api_host
+    port = config.api_port
 
     if not foreground:
+        # ... (rest of start remains the same, but use popen_kwargs)
         # Check if already running
         if config.pid_file.exists():
             try:
                 pid = int(config.pid_file.read_text().strip())
-                # Check if process is still alive
-                os.kill(pid, 0)
-                rprint(Panel(
-                    f"[yellow]MemOS is already running[/yellow] (PID: {pid})\n"
-                    f"Use [bold]memos stop[/bold] to stop it.",
-                    title="⚠️  Already Running",
-                    border_style="yellow",
-                ))
-                raise typer.Exit(1)
+                if os.name == "nt":
+                    import ctypes
+                    handle = ctypes.windll.kernel32.OpenProcess(1, False, pid)
+                    running = bool(handle)
+                    if handle: ctypes.windll.kernel32.CloseHandle(handle)
+                else:
+                    os.kill(pid, 0)
+                    running = True
+                
+                if running:
+                    rprint(Panel(
+                        f"[yellow]MemOS is already running[/yellow] (PID: {pid})\n"
+                        f"Use [bold]memos stop[/bold] to stop it.",
+                        title="⚠️  Already Running",
+                        border_style="yellow",
+                    ))
+                    raise typer.Exit(1)
             except (ProcessLookupError, ValueError, OSError):
                 config.pid_file.unlink(missing_ok=True)
 
         # Start in background
+        clp_status = "[green]Enabled[/green]" if config.enable_clipboard else "[dim]Disabled[/dim]"
         rprint(Panel(
             f"[green]Starting MemOS daemon...[/green]\n\n"
             f"  🌐 API:  [cyan]http://{host}:{port}[/cyan]\n"
             f"  📁 Data: [dim]{config.data_dir}[/dim]\n"
-            f"  🔧 Backend: [magenta]{config.backend}[/magenta]",
+            f"  🔧 Backend: [magenta]{config.backend}[/magenta]\n"
+            f"  📋 Clipboard: {clp_status}\n"
+            f"  👁️  Watch Dirs: [bold]{len(config.watch_dirs)}[/bold]",
             title="🧠 MemOS",
             border_style="green",
         ))
 
-        # Launch daemon process
         env = os.environ.copy()
         env["PYTHONIOENCODING"] = "utf-8"
 
@@ -130,15 +187,13 @@ def start(
         }
 
         if os.name == "nt":
-            # On Windows, use these flags to ensure the process survives when the terminal closes
             popen_kwargs["creationflags"] = (
                 subprocess.CREATE_NEW_PROCESS_GROUP | 
                 subprocess.DETACHED_PROCESS
             )
 
         proc = subprocess.Popen(
-            [sys.executable, "-m", "memos.cli.main", "start", "--foreground",
-             "--host", host, "--port", str(port)],
+            [sys.executable, "-m", "memos.cli.main", "start", "--foreground"],
             **popen_kwargs
         )
 
@@ -147,17 +202,9 @@ def start(
         rprint(f"  [green]✓[/green] MemOS is [bold green]running[/bold green]!")
         return
 
-    # Foreground mode — run uvicorn directly
-    rprint(Panel(
-        f"[green]MemOS daemon starting in foreground...[/green]\n"
-        f"  Press [bold]Ctrl+C[/bold] to stop.",
-        title="🧠 MemOS",
-        border_style="green",
-    ))
-
+    # Foreground mode
     import uvicorn
     from memos.api.server import create_app
-
     api_app = create_app(config=config)
     uvicorn.run(api_app, host=host, port=port, log_level="info")
 
@@ -196,46 +243,51 @@ def stop() -> None:
 
 @app.command()
 def status() -> None:
-    """📊 Show daemon status and statistics."""
+    """📊 Show daemon status, statistics, and connector health."""
     config = _get_config()
-
-    # Check if daemon is running
+    client = _get_api_client()
+    
+    # Check if daemon is running via PID
     running = False
     pid = None
     if config.pid_file.exists():
         try:
             pid = int(config.pid_file.read_text().strip())
             if os.name == "nt":
-                # Windows doesn't support os.kill(pid, 0) reliably for non-child processes
-                # and can throw SystemError in some cases.
-                try:
-                    import ctypes
-                    handle = ctypes.windll.kernel32.OpenProcess(1, False, pid)
-                    if handle:
-                        ctypes.windll.kernel32.CloseHandle(handle)
-                        running = True
-                except Exception:
-                    # Fallback to checking if the PID is actually alive via tasklist if ctypes fails
-                    res = subprocess.run(["tasklist", "/FI", f"PID eq {pid}", "/NH"], 
-                                       capture_output=True, text=True)
-                    running = str(pid) in res.stdout
+                import ctypes
+                handle = ctypes.windll.kernel32.OpenProcess(1, False, pid)
+                if handle:
+                    ctypes.windll.kernel32.CloseHandle(handle)
+                    running = True
             else:
                 os.kill(pid, 0)
                 running = True
         except (ProcessLookupError, ValueError, OSError):
             pass
 
-    # Try to get stats from engine
-    try:
-        engine = _get_engine()
-        stats = engine.stats()
-        engine.close()
-    except Exception:
-        stats = None
+    # Fetch stats (prefer API)
+    stats = None
+    if client:
+        try:
+            stats = client.get("/v1/health").json()
+            running = True # If API is up, it's running
+        except Exception:
+            pass
+        finally:
+            client.close()
+    
+    if stats is None:
+        # Fallback to local engine for basic stats
+        try:
+            engine = _get_engine()
+            stats = engine.stats()
+            engine.close()
+        except Exception:
+            pass
 
     # Build status table
     table = Table(title="🧠 MemOS Status", border_style="cyan", show_header=False)
-    table.add_column("Key", style="bold cyan", width=20)
+    table.add_column("Key", style="bold cyan", width=25)
     table.add_column("Value", style="white")
 
     status_text = "[bold green]● Running[/bold green]" if running else "[bold red]● Stopped[/bold red]"
@@ -246,23 +298,43 @@ def status() -> None:
 
     table.add_row("Version", __version__)
     table.add_row("Data Dir", str(config.data_dir))
-    table.add_row("Backend", config.backend)
+    table.add_row("Backend", stats.get("backend", config.backend) if stats else config.backend)
 
     if stats:
-        table.add_row("Memories", f"[bold]{stats['memory_count']}[/bold]")
-        table.add_row("Embedding Model", stats["embedding_model"])
-        table.add_row("Embedding Dim", str(stats["embedding_dim"]))
+        table.add_row("Memories", f"[bold]{stats.get('memory_count', 0)}[/bold]")
+        table.add_row("Embedding Model", stats.get("embedding_model", "unknown"))
+        
+        # Connector Status
+        conns = stats.get("connectors", {})
+        fw = conns.get("file_watcher", {})
+        cw = conns.get("clipboard_watcher", {})
+        
+        fw_status = "[green]Active[/green]" if fw.get("active") else "[dim]Inactive[/dim]"
+        cw_status = "[green]Active[/green]" if cw.get("active") else "[dim]Inactive[/dim]"
+        
+        table.add_row("File Watcher", fw_status)
+        if fw.get("dirs"):
+            table.add_row("  - Watching", f"{len(fw['dirs'])} directories")
+            
+        table.add_row("Clipboard Watcher", cw_status)
 
-        uptime = stats["uptime_seconds"]
+        uptime = stats.get("uptime_seconds", 0)
+        unit = "seconds"
         if uptime > 3600:
-            table.add_row("Uptime", f"{uptime / 3600:.1f} hours")
+            uptime /= 3600
+            unit = "hours"
         elif uptime > 60:
-            table.add_row("Uptime", f"{uptime / 60:.1f} minutes")
-        else:
-            table.add_row("Uptime", f"{uptime:.0f} seconds")
+            uptime /= 60
+            unit = "minutes"
+        table.add_row("Uptime", f"{uptime:.1f} {unit}")
 
     console.print()
     console.print(table)
+    
+    if stats and stats.get("connectors", {}).get("file_watcher", {}).get("dirs"):
+        console.print("[dim]Watched Dirs:[/dim]")
+        for d in stats["connectors"]["file_watcher"]["dirs"]:
+            console.print(f"  [dim]• {d}[/dim]")
     console.print()
 
 

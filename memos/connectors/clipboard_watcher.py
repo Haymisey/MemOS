@@ -1,12 +1,6 @@
-"""Clipboard Watcher connector for MemOS.
-
-Runs in a background thread, polls the clipboard every few seconds, and
-auto-ingests new copied text into the memory store.
-"""
-
-from __future__ import annotations
-
+import hashlib
 import logging
+import re
 import threading
 import time
 
@@ -15,27 +9,31 @@ import pyperclip
 logger = logging.getLogger("memos.connectors.clipboard_watcher")
 
 # Minimum length of clipboard text to trigger ingestion
-MIN_CLIPBOARD_LENGTH = 20
+MIN_CLIPBOARD_LENGTH = 30
 
 # How often to poll the clipboard (seconds)
 POLL_INTERVAL = 3.0
 
-# Maximum clipboard text to ingest (100 KB — skip huge copy-pastes)
+# Maximum clipboard text to ingest (100 KB)
 MAX_CLIPBOARD_LENGTH = 102_400
+
+# Patterns that look like sensitive data (passwords, keys, UUIDs)
+SENSITIVE_PATTERNS = [
+    re.compile(r"(?i)api[-_]?key['\"]?\s*[:=]\s*['\"]?[a-zA-Z0-9_\-]{16,}['\"]?"), # API Keys
+    re.compile(r"(?i)password['\"]?\s*[:=]\s*['\"]?.{4,}['\"]?"),                # Passwords
+    re.compile(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"), # UUIDs
+    re.compile(r"sk-[a-zA-Z0-9]{20,}"),                                          # OpenAI-like keys
+    re.compile(r"-----BEGIN [A-Z ]+ PRIVATE KEY-----"),                         # Private keys
+]
 
 
 class ClipboardWatcher:
     """Passively watch the clipboard and auto-ingest copied text into MemOS.
 
-    Runs in a daemon thread that polls the system clipboard at a configurable
-    interval. When new text is detected (that is longer than MIN_CLIPBOARD_LENGTH),
-    it is stored as a memory with source="clipboard".
-
-    Example:
-        watcher = ClipboardWatcher(engine)
-        watcher.start()
-        # ... user copies text, it gets auto-ingested ...
-        watcher.stop()
+    Includes strict guardrails:
+    1. Minimum length (30+ characters).
+    2. Sensitive data filtering (regex for API keys, passwords, UUIDs).
+    3. Deduplication (SHA-256 hashing).
     """
 
     def __init__(
@@ -45,19 +43,11 @@ class ClipboardWatcher:
         min_length: int = MIN_CLIPBOARD_LENGTH,
         max_length: int = MAX_CLIPBOARD_LENGTH,
     ) -> None:
-        """Initialize the clipboard watcher.
-
-        Args:
-            engine:        The MemoryEngine to ingest into.
-            poll_interval: Seconds between clipboard checks.
-            min_length:    Minimum text length to trigger ingestion.
-            max_length:    Maximum text length to ingest.
-        """
         self._engine = engine
         self._poll_interval = poll_interval
         self._min_length = min_length
         self._max_length = max_length
-        self._last_content: str = ""
+        self._last_hash: str | None = None
         self._running = False
         self._thread: threading.Thread | None = None
         self._stop_event = threading.Event()
@@ -67,12 +57,12 @@ class ClipboardWatcher:
         if self._running:
             return
 
-        # Capture current clipboard content so we don't ingest
-        # whatever was already there before starting
+        # Fingerprint current clipboard so we don't ingest initial state
         try:
-            self._last_content = pyperclip.paste() or ""
+            initial = pyperclip.paste() or ""
+            self._last_hash = self._fingerprint(initial)
         except Exception:
-            self._last_content = ""
+            self._last_hash = None
 
         self._stop_event.clear()
         self._thread = threading.Thread(
@@ -97,37 +87,50 @@ class ClipboardWatcher:
         self._running = False
         logger.info("ClipboardWatcher stopped.")
 
+    def _fingerprint(self, text: str) -> str:
+        """Generate a SHA-256 fingerprint of the text."""
+        return hashlib.sha256(text.encode("utf-8", errors="ignore")).hexdigest()
+
+    def _is_sensitive(self, text: str) -> bool:
+        """Check if the text matches any sensitive data patterns."""
+        return any(pattern.search(text) for pattern in SENSITIVE_PATTERNS)
+
     def _watch_loop(self) -> None:
-        """Main polling loop — runs in a daemon thread."""
+        """Main polling loop."""
         while not self._stop_event.is_set():
             try:
                 current = pyperclip.paste() or ""
+                stripped = current.strip()
 
-                # Check if clipboard content has changed
-                if current != self._last_content:
-                    self._last_content = current
-                    stripped = current.strip()
+                if not stripped:
+                    self._stop_event.wait(timeout=self._poll_interval)
+                    continue
 
-                    # Only ingest if it meets our criteria
-                    if (
-                        len(stripped) >= self._min_length
-                        and len(stripped) <= self._max_length
-                    ):
+                current_hash = self._fingerprint(stripped)
+
+                # Check for changes via hash
+                if current_hash != self._last_hash:
+                    self._last_hash = current_hash
+
+                    # Apply guardrails
+                    if len(stripped) < self._min_length:
+                        logger.debug("Clipboard too short (%d < %d)", len(stripped), self._min_length)
+                    elif len(stripped) > self._max_length:
+                        logger.debug("Clipboard too large (%d > %d)", len(stripped), self._max_length)
+                    elif self._is_sensitive(stripped):
+                        logger.warning("Clipboard content matched sensitive pattern, skipping.")
+                    else:
                         self._ingest(stripped)
 
             except Exception as e:
-                # pyperclip can throw on some platforms if clipboard is locked
-                logger.debug("Clipboard read error (harmless): %s", e)
+                logger.debug("Clipboard read error: %s", e)
 
-            # Wait for the next poll
             self._stop_event.wait(timeout=self._poll_interval)
 
     def _ingest(self, text: str) -> None:
         """Ingest clipboard text as a memory."""
         try:
-            # Determine memory type based on content heuristics
             memory_type = self._detect_type(text)
-
             self._engine.store(
                 content=text,
                 source="clipboard",
@@ -135,24 +138,14 @@ class ClipboardWatcher:
                 tags=["clipboard", "auto-captured"],
                 metadata={"char_count": len(text)},
             )
-            logger.info(
-                "Ingested clipboard content (%d chars, type=%s)",
-                len(text),
-                memory_type,
-            )
+            logger.info("Ingested clipboard (type=%s, chars=%d)", memory_type, len(text))
         except Exception as e:
             logger.warning("Failed to ingest clipboard content: %s", e)
 
     @staticmethod
     def _detect_type(text: str) -> str:
-        """Heuristic detection of content type from clipboard text.
-
-        Returns:
-            A memory_type string like "code", "url", "note".
-        """
+        """Heuristic detection of content type."""
         stripped = text.strip()
-
-        # Check for code patterns
         code_indicators = [
             "def ", "class ", "import ", "from ", "function ", "const ",
             "let ", "var ", "return ", "if (", "for (", "while (",
@@ -161,19 +154,10 @@ class ClipboardWatcher:
         ]
         if any(indicator in stripped for indicator in code_indicators):
             return "code"
-
-        # Check for URLs
         if stripped.startswith(("http://", "https://", "ftp://")):
             return "url"
-
-        # Check for file paths
-        if stripped.startswith(("/", "C:\\", "~/")):
-            return "file_path"
-
-        # Default
         return "note"
 
     @property
     def is_running(self) -> bool:
-        """Whether the watcher is currently running."""
         return self._running

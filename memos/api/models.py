@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 from pydantic import BaseModel, Field
 
 
@@ -130,6 +132,7 @@ class HealthResponse(BaseModel):
     embedding_model: str
     embedding_dim: int
     data_dir: str
+    connectors: dict[str, Any] = Field(default_factory=dict)
 
 
 class SuccessResponse(BaseModel):
