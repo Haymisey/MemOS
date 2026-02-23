@@ -1,249 +1,117 @@
-<p align="center">
-  <h1 align="center">🧠 MemOS</h1>
-  <p align="center"><strong>The Universal Local Context Daemon</strong></p>
-  <p align="center">
-    A shared memory and knowledge layer for all your AI tools.<br/>
-    <em>SQLite for AI memory — zero cloud, zero config, infinite context.</em>
-  </p>
-</p>
+# 🧠 MemOS
 
-<p align="center">
-  <a href="#-quickstart">Quickstart</a> •
-  <a href="#-architecture">Architecture</a> •
-  <a href="#-api-reference">API</a> •
-  <a href="#-mcp-integration">MCP</a> •
-  <a href="#-cli-reference">CLI</a>
-</p>
+### **The Universal Local Context Daemon for the AI Agent Era**
+
+AI agents currently suffer from **collective amnesia**. Your IDE (Cursor) doesn't know what you told your Chat interface (Claude), and your command-line tools have no idea what you're working on in your browser.
+
+**MemOS** is the missing link. It's a lightweight, blazing-fast background daemon that provides a **shared, semantic memory layer** for every AI tool on your machine.
 
 ---
 
-## 🎯 The Problem
+## ⚡ The Elevator Pitch
+**Whoever owns the local context layer owns the agent decade.** MemOS is building the open-source standard for local AI memory. 
+- **100% Local**: No cloud, no API keys, total privacy.
+- **Autonomous**: Ingests your files and clipboard silently while you work.
+- **Universal**: One API (REST + MCP) to rule them all.
 
-Your AI tools are suffering from **collective amnesia**.
-
-- **Cursor** doesn't know what you told **Claude**.
-- **OpenClaw** can't see what code you wrote in **VS Code**.
-- Every tool reinvents its own memory — flat files, proprietary formats, walled gardens.
-
-## 💡 The Solution
-
-**MemOS** is a lightweight daemon that runs silently on your machine, providing a **universal memory layer** that any AI tool can plug into.
-
-```
-┌─────────────┐  ┌─────────────┐  ┌─────────────┐
-│   Cursor     │  │ Claude Code │  │   OpenClaw   │
-└──────┬───────┘  └──────┬──────┘  └──────┬───────┘
-       │                 │                 │
-       └────────┐        │        ┌────────┘
-                │        │        │
-            ┌───▼────────▼────────▼───┐
-            │        🧠 MemOS          │
-            │   Universal Memory API   │
-            │                          │
-            │  ┌─────────┐ ┌────────┐  │
-            │  │  Zvec    │ │  KG    │  │
-            │  │ Vectors  │ │ Graph  │  │
-            │  └─────────┘ └────────┘  │
-            └──────────────────────────┘
-```
-
-## ✨ Key Features
-
-- **🔌 Pluggable Backend** — Zvec (default), LanceDB, ChromaDB via clean ABC
-- **🧲 Semantic Search** — Embed anything, search by meaning not keywords
-- **🔗 Knowledge Graph** — Track entities and relationships across your work
-- **📋 Clipboard Watcher** — Auto-capture copied text as memories
-- **📁 File Watcher** — Auto-ingest file changes from watched directories
-- **🌐 REST API** — Any tool can store/query via HTTP
-- **🤖 MCP Server** — Native integration with Claude, Cursor, Gemini
-- **💻 Beautiful CLI** — Git-like commands with rich terminal output
-- **🔒 100% Local** — No cloud, no API keys, your data never leaves your machine
+---
 
 ## 🚀 Quickstart
 
-### Installation
-
+### 1. Install
 ```bash
+# Clone and install locally
 pip install -e .
 ```
 
-### Store Your First Memory
-
+### 2. Start the Daemon
 ```bash
-# Via CLI
-memos add "MemOS uses Zvec as its default vector database" --source cli --tags ai,infrastructure
-
-# Search semantically
-memos search "what vector database does memos use"
+# Start MemOS in the background
+memos start --clipboard
 ```
+*MemOS is now monitoring your clipboard and ready to ingest file changes.*
 
-### Start the Daemon
-
+### 3. Check Status
 ```bash
-# Start in background
-memos start
-
-# Or run in foreground
-memos start --foreground
-
-# Check status
 memos status
-
-# Stop
-memos stop
 ```
 
-### Use the REST API
+---
 
-```bash
-# Store a memory
-curl -X POST http://localhost:11437/v1/memories \
-  -H "Content-Type: application/json" \
-  -d '{"content": "Python 3.12 added type parameter syntax", "source": "api", "tags": ["python"]}'
+## 🤖 AI Agent Integration (MCP)
 
-# Semantic search
-curl -X POST http://localhost:11437/v1/memories/search \
-  -H "Content-Type: application/json" \
-  -d '{"query": "python type hints", "top_k": 5}'
+MemOS implements the **Model Context Protocol (MCP)**, allowing it to plug directly into your favorite AI tools as a semantic knowledge base.
 
-# Health check
-curl http://localhost:11437/v1/health
-```
+### 🧩 Cursor / VS Code Integration
+1. Open Cursor Settings.
+2. Go to **Features** -> **MCP**.
+3. Click **+ Add New MCP Server**.
+4. **Name**: `memos`
+5. **Type**: `command`
+6. **Command**: 
+   ```bash
+   memos mcp
+   ```
 
-## 🏗️ Architecture
-
-```
-memos/
-├── core/                    # 🧠 Engine Layer
-│   ├── base.py              # VectorStoreBackend ABC + data models
-│   ├── zvec_backend.py      # Zvec implementation (default)
-│   ├── embeddings.py        # EmbeddingEngine (all-MiniLM-L6-v2, 384d)
-│   ├── memory_engine.py     # MemoryEngine orchestrator
-│   ├── knowledge_graph.py   # Entity-relationship graph
-│   └── config.py            # MemOSConfig
-│
-├── api/                     # 🌐 REST API
-│   ├── server.py            # FastAPI application
-│   └── models.py            # Pydantic request/response models
-│
-├── mcp_server/              # 🤖 Model Context Protocol
-│   └── server.py            # MCP tools + resources
-│
-├── cli/                     # 💻 CLI (Typer + Rich)
-│   └── main.py              # Git-like commands
-│
-└── connectors/              # 🔌 Data Connectors
-    ├── file_watcher.py      # Auto-ingest file changes
-    └── clipboard_watcher.py # Auto-capture clipboard
-```
-
-### Pluggable Backend Design
-
-```python
-class VectorStoreBackend(ABC):
-    """Any backend implements this interface."""
-    def initialize(self) -> None: ...
-    def add(self, id, content, embedding, ...) -> str: ...
-    def search(self, embedding, top_k, filters) -> list[SearchResult]: ...
-    def get(self, id) -> Memory | None: ...
-    def update(self, id, ...) -> bool: ...
-    def delete(self, id) -> bool: ...
-    def list_all(self, filters) -> list[Memory]: ...
-    def count(self) -> int: ...
-    def close(self) -> None: ...
-```
-
-Swap backends with zero code changes:
-```python
-# Default: Zvec
-engine = MemoryEngine(config)
-
-# Future: LanceDB
-config.backend = "lancedb"
-engine = MemoryEngine(config)
-```
-
-## 📡 API Reference
-
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| `POST` | `/v1/memories` | Store a new memory |
-| `POST` | `/v1/memories/search` | Semantic search |
-| `GET` | `/v1/memories/{id}` | Get memory by ID |
-| `PUT` | `/v1/memories/{id}` | Update a memory |
-| `DELETE` | `/v1/memories/{id}` | Delete a memory |
-| `POST` | `/v1/entities` | Add KG entity |
-| `POST` | `/v1/relationships` | Add KG relationship |
-| `POST` | `/v1/graph/search` | Search KG |
-| `GET` | `/v1/health` | Health + stats |
-
-Interactive docs: `http://localhost:11437/docs`
-
-## 🤖 MCP Integration
-
-Add MemOS to your MCP client config:
-
+### 🧡 Claude Desktop Integration
+Add the following to your `claude_desktop_config.json`:
 ```json
 {
   "mcpServers": {
     "memos": {
-      "command": "python",
-      "args": ["-m", "memos.mcp_server.server"]
+      "command": "memos",
+      "args": ["mcp"]
     }
   }
 }
 ```
 
-### Available MCP Tools
+---
 
-| Tool | Description |
-|------|-------------|
-| `memos_store` | Store a memory |
-| `memos_search` | Semantic search |
-| `memos_add_entity` | Add KG entity |
-| `memos_get_related` | Traverse KG |
+## 🕵️‍♂️ Autonomous Ingestors (Connectors)
 
-### MCP Resources
+MemOS works silently in the background so you don't have to manually "add" context.
 
-| URI | Description |
-|-----|-------------|
-| `memos://status` | Daemon status + stats |
-| `memos://recent` | Recently stored memories |
+### 📋 Clipboard Watcher
+Auto-captures copied text as memories.
+- **Security Check**: Automatically ignores API keys, passwords, and UUIDs.
+- **Deduplication**: SHA-256 hashing ensures you never store the same memory twice.
+- **Filter**: Only captures meaningful text (30+ characters).
 
-## 💻 CLI Reference
-
+### 📁 File Watcher
+Indexes your codebases in real-time.
+```bash
+# Watch a directory
+memos watch add .
 ```
-🧠 MemOS — The Universal Local Context Daemon
-
-Commands:
-  start     🚀 Start the MemOS daemon
-  stop      🛑 Stop the daemon
-  status    📊 Show status and statistics
-  add       💾 Store a new memory
-  search    🔍 Semantic search
-  list      📋 List stored memories
-  entity    🔗 Knowledge graph operations
-  version   ℹ️  Show version
-```
-
-## 🛠️ Tech Stack
-
-| Component | Technology | Why |
-|-----------|-----------|-----|
-| Vector DB | **Zvec** (Alibaba) | Embedded, zero-infra, blazing fast |
-| Embeddings | `all-MiniLM-L6-v2` (384d) | Local, ~80MB, no API keys |
-| API | **FastAPI** | Async, auto-docs |
-| CLI | **Typer** + **Rich** | Beautiful, git-like UX |
-| AI Protocol | **MCP** | Open standard for AI tools |
-| File Watch | **watchdog** | OS-native file events |
-| Clipboard | **pyperclip** | Cross-platform clipboard access |
-
-## 📄 License
-
-MIT — build the future, freely.
+- **Smart**: Respects `.gitignore` and ignores `node_modules`, `.git`, `.venv`.
+- **Debounced**: Only saves when you've finished typing.
 
 ---
 
-<!-- <p align="center">
-  <strong>Whoever builds the standard open-source "Memory Layer" that all agents plug into<br/>will own the infrastructure of the AI agent decade.</strong>
-</p> -->
+## 🏗️ Architecture
+
+MemOS is built for speed and stability on Windows:
+- **Backend**: **LanceDB** (Embedded, zero-infra vector storage).
+- **Embeddings**: Local `all-MiniLM-L6-v2` (384-dim, ~80MB).
+- **Daemon**: Detached background process with a persistent REST API.
+- **Bridge**: Remote-First MCP bridge to ensure data consistency.
+
+---
+
+## 💻 CLI Reference
+
+| Command | Action |
+|---------|--------|
+| `memos start` | Launch the context daemon |
+| `memos stop` | Kill the daemon |
+| `memos status` | View active connectors & stats |
+| `memos add` | Manually store a memory |
+| `memos search` | Instant semantic search |
+| `memos watch` | Manage directory intake |
+| `memos mcp` | stdio entry point for IDEs |
+
+---
+
+## 📄 License
+MIT. Build the future of local-first AI.

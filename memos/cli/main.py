@@ -626,6 +626,19 @@ def version() -> None:
     ))
 
 
+@app.command()
+def mcp() -> None:
+    """🔌 Start the MCP server (stdio mode). Use this for Cursor/Claude integration."""
+    import asyncio
+    from memos.mcp_server.server import main as mcp_main
+    
+    # Run the async main function
+    try:
+        asyncio.run(mcp_main())
+    except KeyboardInterrupt:
+        pass
+
+
 # ---------------------------------------------------------------------------
 # Entry Point
 # ---------------------------------------------------------------------------

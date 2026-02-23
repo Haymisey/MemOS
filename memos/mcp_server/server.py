@@ -17,13 +17,13 @@ import logging
 from typing import Any
 
 from mcp.server import Server
-from mcp.server.stdio import run_server
+from mcp.server.stdio import stdio_server
 from mcp.types import (
     Resource,
     TextContent,
     Tool,
 )
-
+import httpx
 from memos import __version__
 from memos.core.base import SearchFilter
 from memos.core.config import MemOSConfig
@@ -33,28 +33,39 @@ from memos.core.memory_engine import MemoryEngine
 logger = logging.getLogger("memos.mcp_server")
 
 # ---------------------------------------------------------------------------
-# MCP Server Setup
+# Global State & Helpers
 # ---------------------------------------------------------------------------
 
 server = Server("memos")
 _engine: MemoryEngine | None = None
 _kg: KnowledgeGraph | None = None
+_config: MemOSConfig = MemOSConfig()
 
+def _get_api_client() -> httpx.AsyncClient | None:
+    """Check if the daemon is running and return an async client if so."""
+    url = f"http://{_config.api_host}:{_config.api_port}"
+    try:
+        # Simple health check (blocking check for existence, but we use sync for sanity)
+        import httpx as sync_httpx
+        with sync_httpx.Client(timeout=0.5) as client:
+            resp = client.get(f"{url}/v1/health")
+            if resp.status_code == 200:
+                return httpx.AsyncClient(base_url=url, timeout=30.0)
+    except Exception:
+        pass
+    return None
 
 def _ensure_engine() -> MemoryEngine:
     global _engine
     if _engine is None:
-        config = MemOSConfig()
-        _engine = MemoryEngine(config=config)
+        _engine = MemoryEngine(config=_config)
         _engine.initialize()
     return _engine
-
 
 def _ensure_kg() -> KnowledgeGraph:
     global _kg
     if _kg is None:
-        config = MemOSConfig()
-        _kg = KnowledgeGraph(config=config)
+        _kg = KnowledgeGraph(config=_config)
         _kg.initialize()
     return _kg
 
@@ -172,98 +183,122 @@ async def list_tools() -> list[Tool]:
 
 @server.call_tool()
 async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
-    """Handle MCP tool calls."""
-    if name == "memos_store":
-        engine = _ensure_engine()
-        memory = engine.store(
-            content=arguments["content"],
-            source=arguments.get("source", "mcp"),
-            memory_type=arguments.get("memory_type", "note"),
-            tags=arguments.get("tags", []),
-        )
-        return [TextContent(
-            type="text",
-            text=json.dumps({
-                "status": "stored",
-                "id": memory.id,
-                "content_length": len(memory.content),
-                "source": memory.source,
-                "memory_type": memory.memory_type,
-            }),
-        )]
+    """Handle MCP tool calls. Prioritizes REST API if daemon is running."""
+    client = _get_api_client()
+    
+    try:
+        if name == "memos_store":
+            if client:
+                resp = await client.post("/v1/memories", json={
+                    "content": arguments["content"],
+                    "source": arguments.get("source", "mcp"),
+                    "memory_type": arguments.get("memory_type", "note"),
+                    "tags": arguments.get("tags", []),
+                })
+                data = resp.json()
+                return [TextContent(type="text", text=json.dumps(data))]
+            else:
+                engine = _ensure_engine()
+                memory = engine.store(
+                    content=arguments["content"],
+                    source=arguments.get("source", "mcp"),
+                    memory_type=arguments.get("memory_type", "note"),
+                    tags=arguments.get("tags", []),
+                )
+                return [TextContent(type="text", text=json.dumps({
+                    "status": "stored",
+                    "id": memory.id,
+                    "content_length": len(memory.content),
+                    "source": memory.source,
+                    "memory_type": memory.memory_type,
+                }))]
 
-    elif name == "memos_search":
-        engine = _ensure_engine()
-        filters = SearchFilter(
-            source=arguments.get("source"),
-            memory_type=arguments.get("memory_type"),
-        )
-        results = engine.search(
-            query=arguments["query"],
-            top_k=arguments.get("top_k", 5),
-            filters=filters,
-        )
-        return [TextContent(
-            type="text",
-            text=json.dumps({
-                "query": arguments["query"],
-                "count": len(results),
-                "results": [
-                    {
-                        "id": r.memory.id,
-                        "content": r.memory.content,
-                        "source": r.memory.source,
-                        "memory_type": r.memory.memory_type,
-                        "tags": r.memory.tags,
-                        "score": r.score,
+        elif name == "memos_search":
+            if client:
+                resp = await client.post("/v1/memories/search", json={
+                    "query": arguments["query"],
+                    "top_k": arguments.get("top_k", 5),
+                    "filters": {
+                        "source": arguments.get("source"),
+                        "memory_type": arguments.get("memory_type"),
                     }
-                    for r in results
-                ],
-            }),
-        )]
+                })
+                data = resp.json()
+                return [TextContent(type="text", text=json.dumps(data))]
+            else:
+                engine = _ensure_engine()
+                filters = SearchFilter(
+                    source=arguments.get("source"),
+                    memory_type=arguments.get("memory_type"),
+                )
+                results = engine.search(
+                    query=arguments["query"],
+                    top_k=arguments.get("top_k", 5),
+                    filters=filters,
+                )
+                return [TextContent(type="text", text=json.dumps({
+                    "query": arguments["query"],
+                    "count": len(results),
+                    "results": [
+                        {
+                            "id": r.memory.id, "content": r.memory.content,
+                            "source": r.memory.source, "memory_type": r.memory.memory_type,
+                            "tags": r.memory.tags, "score": r.score,
+                        } for r in results
+                    ],
+                }))]
 
-    elif name == "memos_add_entity":
-        kg = _ensure_kg()
-        entity = kg.add_entity(
-            name=arguments["name"],
-            entity_type=arguments.get("entity_type", "concept"),
-            properties=arguments.get("properties", {}),
-        )
-        return [TextContent(
-            type="text",
-            text=json.dumps({
-                "status": "created",
-                "id": entity.id,
-                "name": entity.name,
-                "entity_type": entity.entity_type,
-            }),
-        )]
+        elif name == "memos_add_entity":
+            if client:
+                resp = await client.post("/v1/entities", json={
+                    "name": arguments["name"],
+                    "entity_type": arguments.get("entity_type", "concept"),
+                    "properties": arguments.get("properties", {}),
+                })
+                data = resp.json()
+                return [TextContent(type="text", text=json.dumps(data))]
+            else:
+                kg = _ensure_kg()
+                entity = kg.add_entity(
+                    name=arguments["name"],
+                    entity_type=arguments.get("entity_type", "concept"),
+                    properties=arguments.get("properties", {}),
+                )
+                return [TextContent(type="text", text=json.dumps({
+                    "status": "created", "id": entity.id,
+                    "name": entity.name, "entity_type": entity.entity_type,
+                }))]
 
-    elif name == "memos_get_related":
-        kg = _ensure_kg()
-        relationships = kg.get_related(
-            entity_name=arguments["entity_name"],
-            relationship_type=arguments.get("relationship_type"),
-        )
-        return [TextContent(
-            type="text",
-            text=json.dumps({
-                "entity": arguments["entity_name"],
-                "count": len(relationships),
-                "relationships": [
-                    {
-                        "id": r.id,
-                        "from": r.from_entity,
-                        "to": r.to_entity,
-                        "type": r.relationship_type,
-                    }
-                    for r in relationships
-                ],
-            }),
-        )]
+        elif name == "memos_get_related":
+            if client:
+                resp = await client.post("/v1/graph/search", json={
+                    "entity_name": arguments["entity_name"],
+                    "relationship_type": arguments.get("relationship_type"),
+                })
+                data = resp.json()
+                return [TextContent(type="text", text=json.dumps(data))]
+            else:
+                kg = _ensure_kg()
+                relationships = kg.get_related(
+                    entity_name=arguments["entity_name"],
+                    relationship_type=arguments.get("relationship_type"),
+                )
+                return [TextContent(type="text", text=json.dumps({
+                    "entity": arguments["entity_name"],
+                    "count": len(relationships),
+                    "relationships": [
+                        {
+                            "id": r.id, "from": r.from_entity,
+                            "to": r.to_entity, "type": r.relationship_type,
+                        } for r in relationships
+                    ],
+                }))]
 
-    else:
-        return [TextContent(type="text", text=f"Unknown tool: {name}")]
+        else:
+            return [TextContent(type="text", text=f"Unknown tool: {name}")]
+    finally:
+        if client:
+            await client.aclose()
 
 
 # ---------------------------------------------------------------------------
@@ -292,35 +327,37 @@ async def list_resources() -> list[Resource]:
 
 @server.read_resource()
 async def read_resource(uri: str) -> str:
-    """Read an MCP resource."""
-    if uri == "memos://status":
-        engine = _ensure_engine()
-        stats = engine.stats()
-        return json.dumps({
-            "version": __version__,
-            **stats,
-        })
+    """Read an MCP resource. Prioritizes REST API if daemon is running."""
+    client = _get_api_client()
+    try:
+        if uri == "memos://status":
+            if client:
+                resp = await client.get("/v1/health")
+                return json.dumps(resp.json())
+            else:
+                engine = _ensure_engine()
+                stats = engine.stats()
+                return json.dumps({"version": __version__, **stats})
 
-    elif uri == "memos://recent":
-        engine = _ensure_engine()
-        memories = engine.list_memories()
-        # Return last 10
-        recent = memories[-10:] if len(memories) > 10 else memories
-        return json.dumps({
-            "count": len(recent),
-            "memories": [
-                {
-                    "id": m.id,
-                    "content": m.content[:200],
-                    "source": m.source,
-                    "memory_type": m.memory_type,
-                    "created_at": m.created_at,
-                }
-                for m in reversed(recent)
-            ],
-        })
-
-    return json.dumps({"error": f"Unknown resource: {uri}"})
+        elif uri == "memos://recent":
+            engine = _ensure_engine()
+            memories = engine.list_memories()
+            recent = memories[-10:] if len(memories) > 10 else memories
+            return json.dumps({
+                "count": len(recent),
+                "memories": [
+                    {
+                        "id": m.id, "content": m.content[:200],
+                        "source": m.source, "memory_type": m.memory_type,
+                        "created_at": m.created_at,
+                    } for m in reversed(recent)
+                ],
+            })
+        
+        return json.dumps({"error": f"Unknown resource: {uri}"})
+    finally:
+        if client:
+            await client.aclose()
 
 
 # ---------------------------------------------------------------------------
@@ -331,10 +368,10 @@ async def read_resource(uri: str) -> str:
 async def main():
     """Run the MCP server over stdio."""
     logger.info("Starting MemOS MCP Server v%s", __version__)
-    async with run_server(server) as streams:
+    async with stdio_server() as (read_stream, write_stream):
         await server.run(
-            streams[0],
-            streams[1],
+            read_stream,
+            write_stream,
             server.create_initialization_options(),
         )
 
