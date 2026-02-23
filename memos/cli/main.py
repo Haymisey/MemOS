@@ -571,6 +571,30 @@ def list_memories(
         console.print(f"\n  [dim]...and {len(memories) - limit} more. Use --limit to show more.[/dim]")
     console.print()
 
+
+@app.command()
+def delete(memory_id: str = typer.Argument(..., help="Memory ID to delete")) -> None:
+    """🗑️ Delete a memory permanently."""
+    with console.status("[red]Deleting memory...[/red]", spinner="dots"):
+        # Try API first (instant)
+        client = _get_api_client()
+        if client:
+            try:
+                resp = client.delete(f"/v1/memories/{memory_id}")
+                if resp.status_code == 200:
+                    rprint(f"[green]✔ Memory [bold]{memory_id}[/bold] deleted successfully.[/green]")
+                    return
+            except Exception:
+                pass
+
+        # Fallback to local engine (requires loading model)
+        engine = _get_engine()
+        if engine.delete(memory_id):
+            rprint(f"[green]✔ Memory [bold]{memory_id}[/bold] deleted successfully (local).[/green]")
+        else:
+            rprint(f"[red]✖ Memory '{memory_id}' not found.[/red]")
+        engine.close()
+
 @app.command()
 def pin(memory_id: str = typer.Argument(..., help="Memory ID to pin")) -> None:
     """💎 Pin a memory to prevent it from ever expiring."""
