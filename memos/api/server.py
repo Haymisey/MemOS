@@ -11,6 +11,7 @@ Or via the CLI:
 from __future__ import annotations
 
 import logging
+import asyncio
 from contextlib import asynccontextmanager
 from typing import Any
 
@@ -100,13 +101,29 @@ def create_app(config: MemOSConfig | None = None) -> FastAPI:
             app.state.clipboard_watcher = ClipboardWatcher(_engine)
             app.state.clipboard_watcher.start()
 
+        # --- Initialize Garbage Collector ---
+        async def garbage_collection_loop():
+            logger.info("Garbage collection loop started (interval: %ds)", cfg.gc_interval_seconds)
+            try:
+                while True:
+                    await asyncio.sleep(cfg.gc_interval_seconds)
+                    if _engine:
+                        _engine.cleanup_expired()
+            except asyncio.CancelledError:
+                logger.info("Garbage collection loop stopping...")
+
+        # Store the task handle if we need to cancel it later
+        app.state.gc_task = asyncio.create_task(garbage_collection_loop())
+
         logger.info("MemOS API server ready on %s:%d", cfg.api_host, cfg.api_port)
         yield
 
         # Shutdown
         logger.info("Shutting down MemOS API server...")
         
-        # Stop connectors first
+        # Stop connectors/tasks
+        if hasattr(app.state, "gc_task"):
+            app.state.gc_task.cancel()
         if app.state.file_watcher:
             app.state.file_watcher.stop()
         if app.state.clipboard_watcher:
@@ -166,6 +183,8 @@ def _register_memory_routes(app: FastAPI) -> None:
             tags=memory.tags,
             created_at=memory.created_at,
             updated_at=memory.updated_at,
+            expires_at=memory.expires_at,
+            is_pinned=memory.is_pinned,
             metadata=memory.metadata,
         )
 
@@ -191,6 +210,8 @@ def _register_memory_routes(app: FastAPI) -> None:
                         tags=r.memory.tags,
                         created_at=r.memory.created_at,
                         updated_at=r.memory.updated_at,
+                        expires_at=r.memory.expires_at,
+                        is_pinned=r.memory.is_pinned,
                         metadata=r.memory.metadata,
                     ),
                     score=r.score,
@@ -216,6 +237,8 @@ def _register_memory_routes(app: FastAPI) -> None:
             tags=memory.tags,
             created_at=memory.created_at,
             updated_at=memory.updated_at,
+            expires_at=memory.expires_at,
+            is_pinned=memory.is_pinned,
             metadata=memory.metadata,
         )
 
@@ -230,6 +253,8 @@ def _register_memory_routes(app: FastAPI) -> None:
             memory_type=req.memory_type,
             tags=req.tags,
             metadata=req.metadata,
+            expires_at=req.expires_at,
+            is_pinned=req.is_pinned,
         )
         if not success:
             raise HTTPException(status_code=404, detail=f"Memory '{memory_id}' not found")
@@ -243,6 +268,24 @@ def _register_memory_routes(app: FastAPI) -> None:
         if not success:
             raise HTTPException(status_code=404, detail=f"Memory '{memory_id}' not found")
         return SuccessResponse(success=True, message=f"Memory '{memory_id}' deleted")
+
+    @app.post("/v1/memories/{memory_id}/pin", response_model=SuccessResponse, tags=["Memories"])
+    async def pin_memory(memory_id: str):
+        """Pin a memory to prevent auto-expiry."""
+        engine = _get_engine()
+        success = engine.pin(memory_id)
+        if not success:
+            raise HTTPException(status_code=404, detail=f"Memory '{memory_id}' not found")
+        return SuccessResponse(success=True, message=f"Memory '{memory_id}' pinned")
+
+    @app.post("/v1/memories/{memory_id}/unpin", response_model=SuccessResponse, tags=["Memories"])
+    async def unpin_memory(memory_id: str):
+        """Unpin a memory, making it eligible for auto-expiry again."""
+        engine = _get_engine()
+        success = engine.unpin(memory_id)
+        if not success:
+            raise HTTPException(status_code=404, detail=f"Memory '{memory_id}' not found")
+        return SuccessResponse(success=True, message=f"Memory '{memory_id}' unpinned")
 
 
 # ---------------------------------------------------------------------------

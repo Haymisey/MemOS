@@ -535,18 +535,86 @@ def list_memories(
     table.add_column("Content", style="white", max_width=50)
     table.add_column("Source", style="magenta", width=12)
     table.add_column("Type", style="green", width=10)
+    table.add_column("Pin", style="bold yellow", width=4, justify="center")
+    table.add_column("Expiry", style="dim", width=15)
     table.add_column("Tags", style="yellow", width=15)
 
     for m in memories[:limit]:
         content_preview = m.content[:47] + "..." if len(m.content) > 50 else m.content
         tags = ", ".join(m.tags[:3]) if m.tags else "-"
-        table.add_row(m.id, content_preview, m.source, m.memory_type, tags)
+        is_pinned = "💎" if m.is_pinned else "-"
+        
+        # Format expiry
+        expiry = "-"
+        if m.expires_at:
+            try:
+                from datetime import datetime, timezone
+                exp_dt = datetime.fromisoformat(m.expires_at.replace("Z", "+00:00"))
+                now = datetime.now(timezone.utc)
+                diff = exp_dt - now
+                if diff.total_seconds() < 0:
+                    expiry = "[red]Expired[/red]"
+                elif diff.days > 0:
+                    expiry = f"{diff.days}d {diff.seconds // 3600}h"
+                elif diff.seconds > 3600:
+                    expiry = f"{diff.seconds // 3600}h {(diff.seconds % 3600) // 60}m"
+                else:
+                    expiry = f"{diff.seconds // 60}m"
+            except Exception:
+                expiry = m.expires_at[:10]
+
+        table.add_row(m.id, content_preview, m.source, m.memory_type, is_pinned, expiry, tags)
 
     console.print()
     console.print(table)
     if len(memories) > limit:
         console.print(f"\n  [dim]...and {len(memories) - limit} more. Use --limit to show more.[/dim]")
     console.print()
+
+@app.command()
+def pin(memory_id: str = typer.Argument(..., help="Memory ID to pin")) -> None:
+    """💎 Pin a memory to prevent it from ever expiring."""
+    with console.status("[cyan]Pinning memory...[/cyan]", spinner="dots"):
+        client = _get_api_client()
+        if client:
+            try:
+                resp = client.post(f"/v1/memories/{memory_id}/pin")
+                if resp.status_code == 200:
+                    rprint(f"[green]✔ Memory [bold]{memory_id}[/bold] pinned permanently.[/green]")
+                    return
+            except Exception:
+                pass
+        
+        # Fallback to local
+        engine = _get_engine()
+        if engine.pin(memory_id):
+            rprint(f"[green]✔ Memory [bold]{memory_id}[/bold] pinned permanently (local).[/green]")
+        else:
+            rprint(f"[red]✖ Memory '{memory_id}' not found.[/red]")
+        engine.close()
+
+
+@app.command()
+def unpin(memory_id: str = typer.Argument(..., help="Memory ID to unpin")) -> None:
+    """🔓 Unpin a memory, allowing it to expire if it has a TTL."""
+    with console.status("[cyan]Unpinning memory...[/cyan]", spinner="dots"):
+        client = _get_api_client()
+        if client:
+            try:
+                resp = client.post(f"/v1/memories/{memory_id}/unpin")
+                if resp.status_code == 200:
+                    rprint(f"[green]✔ Memory [bold]{memory_id}[/bold] unpinned.[/green]")
+                    return
+            except Exception:
+                pass
+        
+        # Fallback to local
+        engine = _get_engine()
+        if engine.unpin(memory_id):
+            rprint(f"[green]✔ Memory [bold]{memory_id}[/bold] unpinned (local).[/green]")
+        else:
+            rprint(f"[red]✖ Memory '{memory_id}' not found.[/red]")
+        engine.close()
 
 
 # ---------------------------------------------------------------------------

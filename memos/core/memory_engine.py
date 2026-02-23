@@ -15,7 +15,7 @@ import logging
 import time
 from typing import Any
 
-from memos.core.base import Memory, SearchFilter, SearchResult, VectorStoreBackend, generate_id
+from memos.core.base import Memory, SearchFilter, SearchResult, VectorStoreBackend, UNDEFINED, generate_id
 from memos.core.config import MemOSConfig
 from memos.core.embeddings import EmbeddingEngine
 
@@ -104,6 +104,7 @@ class MemoryEngine:
         memory_type: str = "note",
         tags: list[str] | None = None,
         metadata: dict[str, Any] | None = None,
+        ttl_hours: int | None = None,
     ) -> Memory:
         """Store a new memory.
 
@@ -115,11 +116,21 @@ class MemoryEngine:
             memory_type: Category (e.g., "note", "code", "conversation").
             tags:        Optional list of tags for organization.
             metadata:    Optional extra metadata dict.
+            ttl_hours:   Optional override for Time-To-Live in hours.
+                         If None, "clipboard" source gets default TTL from config.
 
         Returns:
             The stored Memory object with its generated ID and embedding.
         """
         backend = self._ensure_initialized()
+        from datetime import datetime, timezone, timedelta
+
+        # Handle auto-expiry for specific sources
+        expires_at = None
+        if ttl_hours is not None:
+            expires_at = (datetime.now(timezone.utc) + timedelta(hours=ttl_hours)).isoformat()
+        elif source == "clipboard":
+            expires_at = (datetime.now(timezone.utc) + timedelta(hours=self.config.clipboard_ttl_hours)).isoformat()
 
         # Generate embedding
         embedding = self._embedder.embed_text(content)
@@ -136,16 +147,17 @@ class MemoryEngine:
             memory_type=memory_type,
             tags=tags or [],
             metadata=metadata,
+            expires_at=expires_at,
+            is_pinned=False,
         )
 
-        logger.info("Stored memory %s (source=%s, %d chars)", memory_id, source, len(content))
+        logger.info("Stored memory %s (source=%s, %d chars, expires=%s)", 
+                    memory_id, source, len(content), expires_at)
 
         # Fetch and return the complete memory
         memory = backend.get(memory_id)
         if memory is None:
             # Construct manually if fetch fails (shouldn't happen)
-            from datetime import datetime, timezone
-
             now = datetime.now(timezone.utc).isoformat()
             memory = Memory(
                 id=memory_id,
@@ -156,6 +168,8 @@ class MemoryEngine:
                 tags=tags or [],
                 created_at=now,
                 updated_at=now,
+                expires_at=expires_at,
+                is_pinned=False,
                 metadata=metadata or {},
             )
 
@@ -207,6 +221,8 @@ class MemoryEngine:
         memory_type: str | None = None,
         tags: list[str] | None = None,
         metadata: dict[str, Any] | None = None,
+        expires_at: str | None = UNDEFINED,
+        is_pinned: bool | None = UNDEFINED,
     ) -> bool:
         """Update an existing memory.
 
@@ -238,6 +254,8 @@ class MemoryEngine:
             memory_type=memory_type,
             tags=tags,
             metadata=metadata,
+            expires_at=expires_at,
+            is_pinned=is_pinned,
         )
 
         if success:
@@ -270,6 +288,30 @@ class MemoryEngine:
         """
         backend = self._ensure_initialized()
         return backend.list_all(filters=filters)
+
+    def cleanup_expired(self) -> int:
+        """Find and delete expired memories. Delegate to backend."""
+        backend = self._ensure_initialized()
+        count = backend.cleanup_expired()
+        if count > 0:
+            logger.info("Garbage collection: purged %d memories", count)
+        return count
+
+    def pin(self, memory_id: str) -> bool:
+        """Mark a memory as pinned (permanent) and remove its expiry."""
+        return self.update(memory_id, is_pinned=True, expires_at=None)
+
+    def unpin(self, memory_id: str, ttl_hours: int | UNDEFINED = UNDEFINED) -> bool:
+        """Unpin a memory, making it eligible for auto-expiry again."""
+        from datetime import datetime, timezone, timedelta
+        expires_at = UNDEFINED
+        if ttl_hours is not UNDEFINED:
+            if ttl_hours is not None:
+                expires_at = (datetime.now(timezone.utc) + timedelta(hours=ttl_hours)).isoformat()
+            else:
+                expires_at = None
+        
+        return self.update(memory_id, is_pinned=False, expires_at=expires_at)
 
     # -------------------------------------------------------------------
     # Status & Lifecycle

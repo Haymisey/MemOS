@@ -10,7 +10,15 @@ import uuid
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, TypeVar
+
+# Sentinel for optional fields in updates to distinguish between None (set to null) 
+# and UNDEFINED (do not update).
+class _Undefined:
+    def __repr__(self): return "UNDEFINED"
+    def __bool__(self): return False
+
+UNDEFINED: Any = _Undefined()
 
 
 # ---------------------------------------------------------------------------
@@ -42,6 +50,8 @@ class Memory:
     tags: list[str] = field(default_factory=list)
     created_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
     updated_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+    expires_at: str | None = None
+    is_pinned: bool = False
     metadata: dict[str, Any] = field(default_factory=dict)
 
 
@@ -120,6 +130,8 @@ class VectorStoreBackend(ABC):
         memory_type: str,
         tags: list[str],
         metadata: dict[str, Any] | None = None,
+        expires_at: str | None = None,
+        is_pinned: bool = False,
     ) -> str:
         """Store a new memory.
 
@@ -172,6 +184,8 @@ class VectorStoreBackend(ABC):
         memory_type: str | None = None,
         tags: list[str] | None = None,
         metadata: dict[str, Any] | None = None,
+        expires_at: str | None = UNDEFINED,
+        is_pinned: bool | None = UNDEFINED,
     ) -> bool:
         """Update an existing memory's fields.
 
@@ -204,6 +218,16 @@ class VectorStoreBackend(ABC):
     @abstractmethod
     def count(self) -> int:
         """Return the total number of stored memories."""
+
+    @abstractmethod
+    def cleanup_expired(self) -> int:
+        """Find and delete memories that have expired.
+        
+        A memory is considered expired if expires_at < now() AND is_pinned == False.
+        
+        Returns:
+            Number of memories deleted.
+        """
 
     @abstractmethod
     def close(self) -> None:

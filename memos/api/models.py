@@ -40,6 +40,8 @@ class UpdateMemoryRequest(BaseModel):
     memory_type: str | None = None
     tags: list[str] | None = None
     metadata: dict | None = None
+    expires_at: str | None = None
+    is_pinned: bool | None = None
 
 
 class AddEntityRequest(BaseModel):
@@ -82,6 +84,8 @@ class MemoryResponse(BaseModel):
     tags: list[str]
     created_at: str
     updated_at: str
+    expires_at: str | None = None
+    is_pinned: bool = False
     metadata: dict = Field(default_factory=dict)
 
 

@@ -35,6 +35,8 @@ class MemOSConfig:
     log_level: str = "INFO"
     watch_dirs: list[Path] = field(default_factory=list)
     enable_clipboard: bool = False
+    clipboard_ttl_hours: int = 72
+    gc_interval_seconds: int = 3600 # 1 hour
 
     def __post_init__(self) -> None:
         """Load persistent configuration if it exists."""
@@ -91,6 +93,8 @@ class MemOSConfig:
             "enable_clipboard": self.enable_clipboard,
             "api_port": self.api_port,
             "api_host": self.api_host,
+            "clipboard_ttl_hours": self.clipboard_ttl_hours,
+            "gc_interval_seconds": self.gc_interval_seconds,
         }
         self.config_file.write_text(json.dumps(data, indent=2))
 
@@ -109,5 +113,9 @@ class MemOSConfig:
                 self.api_port = int(data["api_port"])
             if "api_host" in data:
                 self.api_host = str(data["api_host"])
+            if "clipboard_ttl_hours" in data:
+                self.clipboard_ttl_hours = int(data["clipboard_ttl_hours"])
+            if "gc_interval_seconds" in data:
+                self.gc_interval_seconds = int(data["gc_interval_seconds"])
         except Exception:
             pass
