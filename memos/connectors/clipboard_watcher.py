@@ -17,12 +17,17 @@ POLL_INTERVAL = 3.0
 # Maximum clipboard text to ingest (100 KB)
 MAX_CLIPBOARD_LENGTH = 102_400
 
-# Patterns that look like sensitive data (passwords, keys, UUIDs)
+# Patterns that look like sensitive data (passwords, keys, UUIDs, tokens)
 SENSITIVE_PATTERNS = [
-    re.compile(r"(?i)api[-_]?key['\"]?\s*[:=]\s*['\"]?[a-zA-Z0-9_\-]{16,}['\"]?"), # API Keys
+    re.compile(r"AIza[0-9A-Za-z-_]{35}"),                                        # Google API Keys
+    re.compile(r"sk-[a-zA-Z0-9\-]{20,}"),                                        # OpenAI / Anthropic Keys
+    re.compile(r"gh[p|u|s|r]_[a-zA-Z0-9]{36}"),                                 # GitHub Tokens
+    re.compile(r"AKIA[0-9A-Z]{16}"),                                             # AWS Access Keys
+    re.compile(r"[rs]k_(live|test)_[a-zA-Z0-9]+"),                             # Stripe Keys
+    re.compile(r"[a-zA-Z0-9\-_]+\.[a-zA-Z0-9\-_]+\.[a-zA-Z0-9\-_]+"),             # JWT Tokens
+    re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"), # UUIDs
+    re.compile(r"(?i)api[-_]?key['\"]?\s*[:=]\s*['\"]?[a-zA-Z0-9_\-]{16,}['\"]?"), # Generic API Keys
     re.compile(r"(?i)password['\"]?\s*[:=]\s*['\"]?.{4,}['\"]?"),                # Passwords
-    re.compile(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"), # UUIDs
-    re.compile(r"sk-[a-zA-Z0-9]{20,}"),                                          # OpenAI-like keys
     re.compile(r"-----BEGIN [A-Z ]+ PRIVATE KEY-----"),                         # Private keys
 ]
 
