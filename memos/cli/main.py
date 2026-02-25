@@ -704,6 +704,38 @@ def entity_search(
 
 
 # ---------------------------------------------------------------------------
+# Shell Integration
+# ---------------------------------------------------------------------------
+
+
+@app.command()
+def init(
+    shell: str = typer.Argument(..., help="Shell to initialize (bash, zsh, powershell)"),
+) -> None:
+    """🐚 Initialize shell integration for automatic error catching."""
+    from memos.cli.shell_integration import (
+        generate_bash_hook,
+        generate_zsh_hook,
+        generate_powershell_hook,
+    )
+    
+    config = _get_config()
+    api_url = f"http://{config.api_host}:{config.api_port}"
+    
+    shell = shell.lower()
+    if shell == "bash":
+        sys.stdout.write(generate_bash_hook(api_url) + "\n")
+    elif shell == "zsh":
+        sys.stdout.write(generate_zsh_hook(api_url) + "\n")
+    elif shell == "powershell":
+        sys.stdout.write(generate_powershell_hook(api_url) + "\n")
+    else:
+        rprint(f"[red]Error:[/red] Unsupported shell: {shell}")
+        rprint("[dim]Supported shells: bash, zsh, powershell[/dim]")
+        raise typer.Exit(1)
+
+
+# ---------------------------------------------------------------------------
 # Version & Info
 # ---------------------------------------------------------------------------
 
